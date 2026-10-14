@@ -10,7 +10,6 @@ pub struct SavedConnection {
     pub id: String,
     pub server: String,
     pub port: Option<u16>,
-    pub windows_auth: bool,
     pub username: String,
     pub trust_server_certificate: bool,
 }
@@ -24,11 +23,7 @@ impl SavedConnection {
     }
 
     pub fn detail(&self) -> String {
-        let auth = if self.windows_auth {
-            "Windows account".to_owned()
-        } else {
-            format!("SQL login {}", self.username)
-        };
+        let auth = format!("SQL login {}", self.username);
         if self.trust_server_certificate {
             format!("{auth} · certificate override")
         } else {
@@ -38,10 +33,7 @@ impl SavedConnection {
 }
 
 pub fn connections_path() -> PathBuf {
-    let base = std::env::var_os("APPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-    base.join("SQL Job Monitor").join("connections.json")
+    crate::paths::app_data_dir().join("connections.json")
 }
 
 pub fn load() -> Vec<SavedConnection> {
@@ -52,7 +44,10 @@ pub fn load_from(path: &Path) -> Vec<SavedConnection> {
     let Ok(text) = fs::read_to_string(path) else {
         return Vec::new();
     };
-    serde_json::from_str(&text).unwrap_or_default()
+    let mut connections: Vec<SavedConnection> = serde_json::from_str(&text).unwrap_or_default();
+    // Integrated-auth entries copied from the Windows build have no SQL login to sign in with.
+    connections.retain(|connection| !connection.username.trim().is_empty());
+    connections
 }
 
 pub fn store(connections: &[SavedConnection]) -> Result<(), String> {
@@ -67,7 +62,7 @@ pub fn store_at(path: &Path, connections: &[SavedConnection]) -> Result<(), Stri
     fs::write(path, text).map_err(|error| error.to_string())
 }
 
-/// Inserts or updates a connection matched by server, port, authentication, and login.
+/// Inserts or updates a connection matched by server, port, and login.
 /// The matching entry stays at the top so the most recent login is first.
 pub fn upsert(connections: &mut Vec<SavedConnection>, mut connection: SavedConnection) -> String {
     if connection.id.is_empty() {
@@ -107,7 +102,6 @@ pub fn delete_password(id: &str) {
 fn same_target(left: &SavedConnection, right: &SavedConnection) -> bool {
     left.server.eq_ignore_ascii_case(&right.server)
         && left.port == right.port
-        && left.windows_auth == right.windows_auth
         && left.username.eq_ignore_ascii_case(&right.username)
         && left.trust_server_certificate == right.trust_server_certificate
 }
@@ -121,7 +115,6 @@ mod tests {
             id: String::new(),
             server: server.to_owned(),
             port: None,
-            windows_auth: username.is_empty(),
             username: username.to_owned(),
             trust_server_certificate: false,
         }
@@ -130,13 +123,13 @@ mod tests {
     #[test]
     fn upsert_deduplicates_and_moves_recent_login_first() {
         let mut connections = Vec::new();
-        upsert(&mut connections, sample("alpha", ""));
+        upsert(&mut connections, sample("alpha", "reader"));
         upsert(&mut connections, sample("beta", "sa"));
-        upsert(&mut connections, sample("ALPHA", ""));
+        upsert(&mut connections, sample("ALPHA", "Reader"));
 
         assert_eq!(connections.len(), 2);
         assert_eq!(connections[0].server, "ALPHA");
-        assert_eq!(connections[0].detail(), "Windows account");
+        assert_eq!(connections[0].detail(), "SQL login Reader");
         assert_eq!(connections[1].label(), "beta");
     }
 
@@ -151,5 +144,24 @@ mod tests {
         let text = serde_json::to_string(&loaded).unwrap();
         assert_eq!(loaded[0].server, connection.server);
         assert!(!text.to_lowercase().contains("password"));
+    }
+
+    #[test]
+    fn reads_connections_saved_with_the_windows_auth_flag() {
+        let text = r#"[{"id":"1","server":"dwh","port":1433,"windows_auth":false,
+            "username":"reader","trust_server_certificate":true},
+            {"id":"2","server":"dwh","port":null,"windows_auth":true,
+            "username":"","trust_server_certificate":false}]"#;
+        let path = std::env::temp_dir().join(format!("sql-job-monitor-{}.json", Uuid::new_v4()));
+        fs::write(&path, text).unwrap();
+        let loaded = load_from(&path);
+        let _ = fs::remove_file(&path);
+
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].label(), "dwh:1433");
+        assert_eq!(
+            loaded[0].detail(),
+            "SQL login reader · certificate override"
+        );
     }
 }

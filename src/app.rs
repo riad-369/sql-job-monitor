@@ -6,6 +6,7 @@ use crate::{
         timeline::{build_timeline, TimelineHistory, TimelineLane},
         ActiveRun, HistoryRun, Job, SortColumn,
     },
+    platform,
     saved::{self, SavedConnection},
     settings::{self, UiSettings},
     sql::{self, Authentication, ConnectionOptions, SharedClient},
@@ -26,16 +27,16 @@ use tokio::runtime::{Handle, Runtime};
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
 
-fn enable_dark_title_bar(ui: &MainWindow) {
+fn install_window_hooks(ui: &MainWindow) {
     use slint::winit_030::{EventResult, WinitWindowAccessor};
     use std::cell::Cell;
     use std::rc::Rc;
 
-    let applied = Rc::new(Cell::new(false));
-    let control_held = Rc::new(Cell::new(false));
+    let fitted = Rc::new(Cell::new(false));
+    let command_held = Rc::new(Cell::new(false));
     let ui_weak = ui.as_weak();
     ui.window().on_winit_window_event(move |window, event| {
-        if handle_shortcut(event, &ui_weak, &control_held) {
+        if handle_shortcut(event, &ui_weak, &command_held) {
             return EventResult::PreventDefault;
         }
         if let slint::winit_030::winit::event::WindowEvent::ThemeChanged(theme) = event {
@@ -44,7 +45,7 @@ fn enable_dark_title_bar(ui: &MainWindow) {
                 Theme::get(&ui).set_system_light(light);
             }
         }
-        if !applied.get()
+        if !fitted.get()
             && matches!(
                 event,
                 slint::winit_030::winit::event::WindowEvent::RedrawRequested
@@ -52,19 +53,20 @@ fn enable_dark_title_bar(ui: &MainWindow) {
         {
             let done = window
                 .with_winit_window(|winit_window| {
-                    let titled = apply_dark_title(winit_window);
-                    let fitted = ui_weak.upgrade().is_some_and(|ui| {
+                    ui_weak.upgrade().is_some_and(|ui| {
                         let light = matches!(
                             winit_window.theme(),
                             Some(slint::winit_030::winit::window::Theme::Light)
                         );
                         Theme::get(&ui).set_system_light(light);
-                        fit_window_to_monitor(winit_window, &ui)
-                    });
-                    titled && fitted
+                        platform::fit_window_to_monitor(winit_window, |width, height| {
+                            ui.set_window_min_width(width);
+                            ui.set_window_min_height(height);
+                        })
+                    })
                 })
                 .unwrap_or(false);
-            applied.set(done);
+            fitted.set(done);
         }
         EventResult::Propagate
     });
@@ -73,14 +75,14 @@ fn enable_dark_title_bar(ui: &MainWindow) {
 fn handle_shortcut(
     event: &slint::winit_030::winit::event::WindowEvent,
     ui_weak: &Weak<MainWindow>,
-    control_held: &std::cell::Cell<bool>,
+    command_held: &std::cell::Cell<bool>,
 ) -> bool {
     use slint::winit_030::winit::event::{ElementState, WindowEvent};
     use slint::winit_030::winit::keyboard::{Key, NamedKey};
 
     match event {
         WindowEvent::ModifiersChanged(modifiers) => {
-            control_held.set(modifiers.state().control_key());
+            command_held.set(platform::primary_modifier(modifiers.state()));
             false
         }
         WindowEvent::KeyboardInput {
@@ -96,6 +98,14 @@ fn handle_shortcut(
                     ui.invoke_refresh_requested();
                     true
                 }
+                Key::Character(text)
+                    if command_held.get()
+                        && text.eq_ignore_ascii_case("r")
+                        && ui.get_connected() =>
+                {
+                    ui.invoke_refresh_requested();
+                    true
+                }
                 Key::Named(NamedKey::Escape) => {
                     ui.set_confirm_stop_visible(false);
                     ui.set_job_menu_open(false);
@@ -105,7 +115,7 @@ fn handle_shortcut(
                     true
                 }
                 Key::Character(text)
-                    if control_held.get()
+                    if command_held.get()
                         && text.eq_ignore_ascii_case("f")
                         && ui.get_connected() =>
                 {
@@ -192,7 +202,6 @@ fn fill_saved_form(ui: &MainWindow, id: &str) {
             .into(),
     );
     ui.set_form_username(saved.username.into());
-    ui.set_form_windows_auth(saved.windows_auth);
     ui.set_form_trust_certificate(saved.trust_server_certificate);
 }
 
@@ -242,41 +251,6 @@ fn move_job_selection(ui: &MainWindow, delta: i32) {
     ui.set_selection_scroll_tick(ui.get_selection_scroll_tick().wrapping_add(1));
 }
 
-fn open_in_browser(url: &str) {
-    use std::os::windows::ffi::OsStrExt;
-    let operation: Vec<u16> = std::ffi::OsStr::new("open")
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-    let file: Vec<u16> = std::ffi::OsStr::new(url)
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-    // ShellExecuteW hands the URL to the default browser and never creates a console.
-    let _ = unsafe {
-        ShellExecuteW(
-            std::ptr::null_mut(),
-            operation.as_ptr(),
-            file.as_ptr(),
-            std::ptr::null(),
-            std::ptr::null(),
-            1,
-        )
-    };
-}
-
-#[link(name = "shell32")]
-extern "system" {
-    fn ShellExecuteW(
-        hwnd: *mut core::ffi::c_void,
-        operation: *const u16,
-        file: *const u16,
-        parameters: *const u16,
-        directory: *const u16,
-        show: i32,
-    ) -> isize;
-}
-
 fn refreshed_ago(epoch: i32) -> String {
     if epoch <= 0 {
         return "Not updated yet".to_owned();
@@ -297,158 +271,6 @@ fn schedule_phrase(kind: &str, epoch: i32) -> String {
         next_run_in(-delta)
     } else {
         last_ran(delta)
-    }
-}
-
-fn apply_dark_title(window: &slint::winit_030::winit::window::Window) -> bool {
-    use slint::winit_030::winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
-
-    let Ok(handle) = window.window_handle() else {
-        return false;
-    };
-    let RawWindowHandle::Win32(win32) = handle.as_raw() else {
-        return false;
-    };
-    let hwnd = win32.hwnd.get();
-    unsafe {
-        // 19 is the Windows 10 value; 20 is the current dark-mode attribute.
-        set_caption_attribute(hwnd, 19, 1);
-        set_caption_attribute(hwnd, 20, 1);
-        set_caption_attribute(hwnd, 35, color_ref(0x10, 0x15, 0x1D));
-        set_caption_attribute(hwnd, 34, color_ref(0x2A, 0x39, 0x4B));
-        set_caption_attribute(hwnd, 36, color_ref(0xE9, 0xEE, 0xF5));
-    }
-    true
-}
-
-fn color_ref(red: u32, green: u32, blue: u32) -> u32 {
-    red | (green << 8) | (blue << 16)
-}
-
-fn fit_window_to_monitor(
-    window: &slint::winit_030::winit::window::Window,
-    ui: &MainWindow,
-) -> bool {
-    use slint::winit_030::winit::dpi::{PhysicalPosition, PhysicalSize};
-
-    let inner = window.inner_size();
-    if inner.width == 0 || inner.height == 0 {
-        return false;
-    }
-    let Some(work) = monitor_work_area(window) else {
-        return true;
-    };
-
-    let scale = window.scale_factor();
-    let outer = window.outer_size();
-    let frame_w = outer.width.saturating_sub(inner.width);
-    let frame_h = outer.height.saturating_sub(inner.height);
-    let work_w = work.right.saturating_sub(work.left);
-    let work_h = work.bottom.saturating_sub(work.top);
-    let logical_w = work_w as f64 / scale;
-    let logical_h = work_h as f64 / scale;
-    ui.set_window_min_width((logical_w - 32.0).clamp(320.0, 800.0) as f32);
-    ui.set_window_min_height((logical_h - 48.0).clamp(240.0, 480.0) as f32);
-
-    let preferred_w = (1440.0 * scale).round() as u32;
-    let preferred_h = (860.0 * scale).round() as u32;
-    let max_inner_w = (work_w as u32).saturating_sub(frame_w).saturating_sub(24);
-    let max_inner_h = (work_h as u32).saturating_sub(frame_h).saturating_sub(24);
-    let inner_w = preferred_w.min(max_inner_w).max(1);
-    let inner_h = preferred_h.min(max_inner_h).max(1);
-    let outer_w = inner_w + frame_w;
-    let outer_h = inner_h + frame_h;
-    let x = work.left + (work_w - outer_w as i32) / 2;
-    let y = work.top + (work_h - outer_h as i32) / 2;
-
-    window.set_outer_position(PhysicalPosition::new(x, y));
-    let _ = window.request_inner_size(PhysicalSize::new(inner_w, inner_h));
-    true
-}
-
-struct WorkArea {
-    left: i32,
-    top: i32,
-    right: i32,
-    bottom: i32,
-}
-
-fn monitor_work_area(window: &slint::winit_030::winit::window::Window) -> Option<WorkArea> {
-    use slint::winit_030::winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
-
-    let handle = window.window_handle().ok()?;
-    let RawWindowHandle::Win32(win32) = handle.as_raw() else {
-        return None;
-    };
-    unsafe { work_area_from_hwnd(win32.hwnd.get()) }
-}
-
-unsafe fn work_area_from_hwnd(hwnd: isize) -> Option<WorkArea> {
-    #[repr(C)]
-    struct WinRect {
-        left: i32,
-        top: i32,
-        right: i32,
-        bottom: i32,
-    }
-    #[repr(C)]
-    struct MonitorInfo {
-        size: u32,
-        monitor: WinRect,
-        work: WinRect,
-        flags: u32,
-    }
-    #[link(name = "user32")]
-    unsafe extern "system" {
-        fn MonitorFromWindow(hwnd: isize, flags: u32) -> isize;
-        fn GetMonitorInfoW(monitor: isize, info: *mut MonitorInfo) -> i32;
-    }
-
-    unsafe {
-        let monitor = MonitorFromWindow(hwnd, 2);
-        if monitor == 0 {
-            return None;
-        }
-        let mut info = MonitorInfo {
-            size: size_of::<MonitorInfo>() as u32,
-            monitor: WinRect {
-                left: 0,
-                top: 0,
-                right: 0,
-                bottom: 0,
-            },
-            work: WinRect {
-                left: 0,
-                top: 0,
-                right: 0,
-                bottom: 0,
-            },
-            flags: 0,
-        };
-        if GetMonitorInfoW(monitor, &mut info) == 0 {
-            return None;
-        }
-        Some(WorkArea {
-            left: info.work.left,
-            top: info.work.top,
-            right: info.work.right,
-            bottom: info.work.bottom,
-        })
-    }
-}
-
-unsafe fn set_caption_attribute(hwnd: isize, attribute: u32, value: u32) {
-    #[link(name = "dwmapi")]
-    unsafe extern "system" {
-        fn DwmSetWindowAttribute(
-            hwnd: isize,
-            dw_attribute: u32,
-            pv_attribute: *const u32,
-            cb_attribute: u32,
-        ) -> i32;
-    }
-    unsafe {
-        let _ = DwmSetWindowAttribute(hwnd, attribute, &value, size_of::<u32>() as u32);
     }
 }
 
@@ -491,7 +313,14 @@ struct PollingTask {
 
 impl Application {
     pub fn new() -> anyhow::Result<Self> {
+        platform::select_backend();
         let ui = MainWindow::new()?;
+        ui.set_unified_title_bar(platform::uses_unified_title_bar());
+        ui.set_title_inset(if platform::uses_unified_title_bar() {
+            platform::TRAFFIC_LIGHT_INSET
+        } else {
+            0.0
+        });
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .thread_name("sql-job-monitor")
@@ -530,7 +359,7 @@ impl Application {
             self.ui
                 .invoke_saved_login_requested(settings.last_connection_id.clone().into());
         }
-        enable_dark_title_bar(&self.ui);
+        install_window_hooks(&self.ui);
         let ui_weak = self.ui.as_weak();
         self.runtime.spawn(async move {
             loop {
@@ -565,7 +394,7 @@ impl Application {
         self.install_grid_callbacks();
         self.install_command_callbacks();
         self.ui.on_open_coffee_requested(|| {
-            open_in_browser("https://buymeacoffee.com/keithr");
+            platform::open_in_browser("https://buymeacoffee.com/keithr");
         });
 
         let ui_weak = self.ui.as_weak();
@@ -603,14 +432,13 @@ impl Application {
         let generation = self.request_generation.clone();
 
         self.ui.on_connect_requested(
-            move |server, port, username, password, windows_auth, trust_certificate, remember| {
+            move |server, port, username, password, trust_certificate, remember| {
                 let Some(options) = connection_options(
                     &ui_weak,
                     &server,
                     &port,
                     &username,
                     &password,
-                    windows_auth,
                     trust_certificate,
                 ) else {
                     return;
@@ -652,21 +480,16 @@ impl Application {
                         .into(),
                 );
                 ui.set_form_username(saved.username.clone().into());
-                ui.set_form_windows_auth(saved.windows_auth);
                 ui.set_form_trust_certificate(saved.trust_server_certificate);
             }
-            let authentication = if saved.windows_auth {
-                Authentication::Integrated
-            } else {
-                match saved::load_password(&saved.id) {
-                    Ok(password) => Authentication::SqlServer {
-                        username: saved.username.clone(),
-                        password,
-                    },
-                    Err(error) => {
-                        set_error(&ui_weak, &error);
-                        return;
-                    }
+            let authentication = match saved::load_password(&saved.id) {
+                Ok(password) => Authentication::SqlServer {
+                    username: saved.username.clone(),
+                    password,
+                },
+                Err(error) => {
+                    set_error(&ui_weak, &error);
+                    return;
                 }
             };
             begin_connect(ConnectRequest {
@@ -1127,7 +950,6 @@ fn connection_options(
     port: &str,
     username: &str,
     password: &str,
-    windows_auth: bool,
     trust_certificate: bool,
 ) -> Option<ConnectionOptions> {
     let port = if port.trim().is_empty() {
@@ -1145,13 +967,9 @@ fn connection_options(
         server: server.to_string(),
         port,
         database: "msdb".to_owned(),
-        authentication: if windows_auth {
-            Authentication::Integrated
-        } else {
-            Authentication::SqlServer {
-                username: username.to_string(),
-                password: Zeroizing::new(password.to_string()),
-            }
+        authentication: Authentication::SqlServer {
+            username: username.trim().to_string(),
+            password: Zeroizing::new(password.to_string()),
         },
         trust_server_certificate: trust_certificate,
     })
@@ -1236,28 +1054,19 @@ fn begin_connect(request: ConnectRequest) {
 }
 
 fn saved_connection_id(options: &ConnectionOptions) -> Option<String> {
-    let (windows_auth, username) = match &options.authentication {
-        Authentication::Integrated => (true, String::new()),
-        Authentication::SqlServer { username, .. } => (false, username.clone()),
-    };
+    let Authentication::SqlServer { username, .. } = &options.authentication;
     saved::load()
         .into_iter()
         .find(|saved| {
             saved.server.eq_ignore_ascii_case(&options.server)
                 && saved.port == options.port
-                && saved.windows_auth == windows_auth
-                && saved.username.eq_ignore_ascii_case(&username)
+                && saved.username.eq_ignore_ascii_case(username)
         })
         .map(|saved| saved.id)
 }
 
 fn remember_connection(options: &ConnectionOptions) -> Result<String, String> {
-    let (windows_auth, username, password) = match &options.authentication {
-        Authentication::Integrated => (true, String::new(), None),
-        Authentication::SqlServer { username, password } => {
-            (false, username.clone(), Some(password.clone()))
-        }
-    };
+    let Authentication::SqlServer { username, password } = &options.authentication;
     let mut connections = saved::load();
     let id = saved::upsert(
         &mut connections,
@@ -1265,15 +1074,12 @@ fn remember_connection(options: &ConnectionOptions) -> Result<String, String> {
             id: String::new(),
             server: options.server.clone(),
             port: options.port,
-            windows_auth,
-            username,
+            username: username.clone(),
             trust_server_certificate: options.trust_server_certificate,
         },
     );
     saved::store(&connections)?;
-    if let Some(password) = password {
-        saved::store_password(&id, password.as_str())?;
-    }
+    saved::store_password(&id, password.as_str())?;
     Ok(id)
 }
 

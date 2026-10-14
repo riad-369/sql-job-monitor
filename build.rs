@@ -1,11 +1,4 @@
 fn main() {
-    slint_build::compile("ui/main.slint").expect("failed to compile Slint UI");
-
-    println!("cargo:rerun-if-changed=assets/app.ico");
-    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
-        winresource::WindowsResource::new()
-            .set_icon("assets/app.ico")
-            .compile()
-            .expect("failed to embed Windows icon resource");
-    }
+    let config = slint_build::CompilerConfiguration::new().with_style("cupertino".into());
+    slint_build::compile_with_config("ui/main.slint", config).expect("failed to compile Slint UI");
 }

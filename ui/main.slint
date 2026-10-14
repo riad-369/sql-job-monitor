@@ -593,25 +593,14 @@ component CaptionIcon inherits Rectangle {
     }
 }
 
-component WindowMark inherits LucideIcon {
-    in property <int> kind: 0;
-    width: 14px;
-    height: 14px;
-    source: root.kind == 0 ? @image-url("../assets/lucide/minus.svg") :
-            root.kind == 1 ? @image-url("../assets/lucide/square.svg") :
-            root.kind == 2 ? @image-url("../assets/lucide/copy.svg") :
-            @image-url("../assets/lucide/x.svg");
-}
-
 component AppTitleBar inherits Rectangle {
     in property <bool> pinned: false;
-    in property <bool> maximized: false;
+    in property <length> leading-inset: 0px;
+    in property <string> subtitle: "";
     callback theme-clicked();
     callback pin-clicked();
     callback coffee-clicked();
-    callback minimize-clicked();
-    callback maximize-clicked();
-    callback close-clicked();
+    callback zoom-clicked();
     height: 40px;
     background: Theme.titlebar;
 
@@ -619,32 +608,41 @@ component AppTitleBar inherits Rectangle {
         width: parent.width;
         height: parent.height;
 
-        // Under the caption buttons, so a double-click on the bar maximizes
-        // while clicks on the buttons still go to those buttons.
+        // Under the toolbar buttons, so a double-click on the bar zooms the window
+        // (the standard macOS title-bar gesture) while the buttons keep their clicks.
         TouchArea {
             width: parent.width;
             height: parent.height;
-            double-clicked => { root.maximize-clicked(); }
+            double-clicked => { root.zoom-clicked(); }
         }
 
         HorizontalLayout {
             width: parent.width;
             height: parent.height;
-            padding-left: 12px;
-            spacing: 0px;
+            padding-left: 12px + root.leading-inset;
+            padding-right: 10px;
+            spacing: 4px;
             cross-axis-alignment: center;
 
             Image {
                 source: @image-url("../assets/app.png");
-                width: 16px;
-                height: 16px;
+                width: 18px;
+                height: 18px;
             }
             Text {
-                text: "  SQL Job Monitor";
-                color: Theme.text;
+                text: " SQL Job Monitor";
+                color: Theme.text-strong;
                 font-size: 13px;
                 font-weight: 600;
                 vertical-alignment: center;
+            }
+            if root.subtitle != "" : Text {
+                text: "—  " + root.subtitle;
+                color: Theme.muted;
+                font-size: 13px;
+                vertical-alignment: center;
+                overflow: elide;
+                horizontal-stretch: 0;
             }
             Rectangle { horizontal-stretch: 1; }
 
@@ -662,7 +660,7 @@ component AppTitleBar inherits Rectangle {
             }
             CaptionIcon {
                 active: root.pinned;
-                tip: root.pinned ? "Unpin window" : "Keep window on top";
+                tip: root.pinned ? "Stop floating above other windows" : "Float above other windows";
                 clicked => { root.pin-clicked(); }
                 LucideIcon {
                     x: 10px;
@@ -680,35 +678,6 @@ component AppTitleBar inherits Rectangle {
                     source: @image-url("../assets/lucide/coffee.svg");
                 }
             }
-
-            Rectangle { width: 8px; }
-
-            Rectangle {
-                width: 46px;
-                height: 40px;
-                background: min-touch.has-hover ? Theme.hover : transparent;
-                WindowMark { x: 16px; y: 13px; kind: 0; }
-                min-touch := TouchArea { clicked => { root.minimize-clicked(); } }
-            }
-            Rectangle {
-                width: 46px;
-                height: 40px;
-                background: max-touch.has-hover ? Theme.hover : transparent;
-                WindowMark { x: 16px; y: 13px; kind: root.maximized ? 2 : 1; }
-                max-touch := TouchArea { clicked => { root.maximize-clicked(); } }
-            }
-            Rectangle {
-                width: 46px;
-                height: 40px;
-                background: close-touch.has-hover ? #c42b1c : transparent;
-                WindowMark {
-                    x: 16px;
-                    y: 13px;
-                    kind: 3;
-                    tint: close-touch.has-hover ? #ffffff : Theme.text;
-                }
-                close-touch := TouchArea { clicked => { root.close-clicked(); } }
-            }
         }
     }
 
@@ -723,8 +692,6 @@ component AppTitleBar inherits Rectangle {
 export component MainWindow inherits Window {
     title: "SQL Job Monitor";
     icon: @image-url("../assets/app.png");
-    no-frame: true;
-    resize-border-width: 6px;
     always-on-top: root.pinned;
     preferred-width: 1440px;
     preferred-height: 860px;
@@ -892,12 +859,14 @@ export component MainWindow inherits Window {
     in-out property <string> form-server: "";
     in-out property <string> form-port: "";
     in-out property <string> form-username: "";
-    in-out property <bool> form-windows-auth: true;
+    // Set by the app: the native title bar is merged into the content (macOS).
+    in-out property <bool> unified-title-bar: false;
+    in-out property <length> title-inset: 0px;
     in-out property <bool> form-trust-certificate: false;
     in-out property <bool> pinned: false;
     in-out property <int> search-focus-tick: 0;
 
-    callback connect-requested(string, string, string, string, bool, bool, bool);
+    callback connect-requested(string, string, string, string, bool, bool);
     callback disconnect-requested();
     callback refresh-requested();
     callback filters-changed(string, string);
@@ -1044,7 +1013,7 @@ export component MainWindow inherits Window {
                     spacing: 4px;
                     Text { text: "Server or named instance"; color: Theme.label; font-size: 12px; }
                     server-input := LineEdit {
-                        placeholder-text: "SERVER or SERVER\\INSTANCE";
+                        placeholder-text: "sql.example.com, HOST\\INSTANCE, or HOST,PORT";
                         text <=> root.form-server;
                     }
                 }
@@ -1066,25 +1035,35 @@ export component MainWindow inherits Window {
                     }
                 }
 
-                windows-auth := CheckBox {
-                    text: "Use my current Windows account";
-                    checked: root.form-windows-auth;
-                    toggled => { root.form-windows-auth = self.checked; }
-                }
-
                 credentials := VerticalLayout {
-                    opacity: windows-auth.checked ? 0.45 : 1;
                     spacing: 4px;
-                    Text { text: "SQL login"; color: Theme.label; font-size: 12px; }
+                    Text { text: "SQL Server login"; color: Theme.label; font-size: 12px; }
                     username-input := LineEdit {
                         placeholder-text: "Username";
-                        enabled: !windows-auth.checked;
                         text <=> root.form-username;
                     }
                     password-input := LineEdit {
                         placeholder-text: "Password";
                         input-type: password;
-                        enabled: !windows-auth.checked;
+                        accepted => {
+                            if !root.busy && server-input.text != "" && username-input.text != "" {
+                                root.connect-requested(
+                                    server-input.text,
+                                    port-input.text,
+                                    username-input.text,
+                                    password-input.text,
+                                    trust-cert.checked,
+                                    remember-connection.checked
+                                );
+                                password-input.text = "";
+                            }
+                        }
+                    }
+                    Text {
+                        text: "Windows authentication isn't available on macOS. Remembered passwords are kept in your login Keychain.";
+                        color: Theme.muted-2;
+                        font-size: 11px;
+                        wrap: word-wrap;
                     }
                 }
 
@@ -1117,14 +1096,14 @@ export component MainWindow inherits Window {
 
                 Button {
                     text: root.busy ? "Connecting…" : "Connect";
-                    enabled: !root.busy && server-input.text != "";
+                    primary: true;
+                    enabled: !root.busy && server-input.text != "" && username-input.text != "";
                     clicked => {
                         root.connect-requested(
                             server-input.text,
                             port-input.text,
                             username-input.text,
                             password-input.text,
-                            windows-auth.checked,
                             trust-cert.checked,
                             remember-connection.checked
                         );
@@ -1651,7 +1630,7 @@ export component MainWindow inherits Window {
                             Rectangle { width: 10px; }
                             Text {
                                 text: root.timeline-loading ? "Loading history…" :
-                                      root.timeline-hover != "" ? root.timeline-hover : "Ctrl + mouse wheel zooms. Hover a bar for details.";
+                                      root.timeline-hover != "" ? root.timeline-hover : "⌘ + scroll to zoom. Hover a bar for details.";
                                 color: root.timeline-hover != "" ? Theme.text : Theme.muted-2;
                                 font-size: 12px;
                                 vertical-alignment: center;
@@ -2366,13 +2345,12 @@ export component MainWindow inherits Window {
         y: 0px;
         width: parent.width;
         pinned: root.pinned;
-        maximized: root.maximized;
+        leading-inset: root.title-inset;
+        subtitle: root.connected ? root.server-label : "";
         theme-clicked => { Theme.mode = mod(Theme.mode + 1, 3); root.persist-requested(); }
         pin-clicked => { root.pinned = !root.pinned; root.persist-requested(); }
         coffee-clicked => { root.open-coffee-requested(); }
-        minimize-clicked => { root.minimized = true; }
-        maximize-clicked => { root.maximized = !root.maximized; }
-        close-clicked => { root.close(); }
+        zoom-clicked => { root.maximized = !root.maximized; }
     }
 
     if root.confirm-stop-visible : Rectangle {

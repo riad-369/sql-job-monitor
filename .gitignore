@@ -1,6 +1,4 @@
 /target/
-*.msi
-*.wixobj
-*.wixpdb
+/dist/
+.DS_Store
 .env
-
