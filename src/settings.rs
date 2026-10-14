@@ -91,10 +91,7 @@ impl UiSettings {
 }
 
 pub fn settings_path() -> PathBuf {
-    let base = std::env::var_os("APPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-    base.join("SQL Job Monitor").join("settings.json")
+    crate::paths::app_data_dir().join("settings.json")
 }
 
 pub fn load() -> UiSettings {

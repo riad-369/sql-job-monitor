@@ -1,3 +1,9 @@
+#[cfg(all(feature = "rustls-tls", feature = "legacy-tls"))]
+compile_error!(
+    "rustls-tls and legacy-tls cannot be combined. Rebuild the legacy client with \
+     `cargo build --release --no-default-features --features legacy-tls`."
+);
+
 use crate::domain::{
     format_step_progress, sql_agent_duration, timeline::TimelineHistory, HistoryEntry, Job,
     JobStatus, JobStep,
@@ -35,6 +41,10 @@ pub struct ConnectionOptions {
 pub enum MonitorError {
     #[error("The server name is required.")]
     MissingServer,
+    #[error("Enter a SQL Server login.")]
+    MissingLogin,
+    #[error("Windows authentication is not available on macOS. Use a SQL Server login.")]
+    WindowsAuthUnavailable,
     #[error("Connection timed out. Check the server name, TCP configuration, and firewall.")]
     ConnectionTimeout,
     #[error("The SQL operation timed out after 20 seconds.")]
@@ -49,7 +59,8 @@ pub async fn connect(options: &ConnectionOptions) -> Result<SharedClient, Monito
     }
 
     let mut config = Config::new();
-    let (host, instance) = split_instance(options.server.trim());
+    let (server, port) = split_port(options.server.trim(), options.port);
+    let (host, instance) = split_instance(server);
     config.host(host);
     config.database(if options.database.trim().is_empty() {
         "msdb"
@@ -62,9 +73,26 @@ pub async fn connect(options: &ConnectionOptions) -> Result<SharedClient, Monito
     }
 
     match &options.authentication {
-        Authentication::Integrated => config.authentication(AuthMethod::Integrated),
+        Authentication::Integrated => {
+            #[cfg(windows)]
+            {
+                config.authentication(AuthMethod::Integrated);
+            }
+            #[cfg(not(windows))]
+            {
+                return Err(MonitorError::WindowsAuthUnavailable);
+            }
+        }
         Authentication::SqlServer { username, password } => {
-            config.authentication(AuthMethod::sql_server(username, password.as_str()))
+            let login = if cfg!(target_os = "macos") {
+                username.trim()
+            } else {
+                username.as_str()
+            };
+            if login.trim().is_empty() {
+                return Err(MonitorError::MissingLogin);
+            }
+            config.authentication(AuthMethod::sql_server(login, password.as_str()));
         }
     }
 
@@ -76,7 +104,7 @@ pub async fn connect(options: &ConnectionOptions) -> Result<SharedClient, Monito
             .map_err(|_| MonitorError::ConnectionTimeout)?
             .map_err(classify_error)?
     } else {
-        config.port(options.port.unwrap_or(1433));
+        config.port(port.unwrap_or(1433));
         timeout(
             Duration::from_secs(12),
             TcpStream::connect(config.get_addr()),
@@ -518,6 +546,19 @@ fn integer(row: &Row, column: &str) -> Result<i32, MonitorError> {
         .map_err(classify_error)
 }
 
+fn split_port(server: &str, port: Option<u16>) -> (&str, Option<u16>) {
+    if port.is_some() {
+        return (server, port);
+    }
+    match server.rsplit_once(',') {
+        Some((host, value)) if !host.trim().is_empty() => match value.trim().parse() {
+            Ok(parsed) => (host.trim(), Some(parsed)),
+            Err(_) => (server, None),
+        },
+        _ => (server, None),
+    }
+}
+
 fn split_instance(server: &str) -> (&str, Option<&str>) {
     match server.split_once('\\') {
         Some((host, instance)) if !host.is_empty() && !instance.is_empty() => {
@@ -531,12 +572,128 @@ fn classify_error(error: tiberius::error::Error) -> MonitorError {
     classify_message(&error.to_string())
 }
 
+/// The TLS implementation compiled into this build, shown in TLS errors so a
+/// stale copy of the app is easy to spot.
+#[cfg(feature = "legacy-tls")]
+pub fn tls_backend() -> String {
+    format!(
+        "{} at security level 0 (TLS 1.0 to 1.3)",
+        openssl::version::version()
+            .split_whitespace()
+            .take(2)
+            .collect::<Vec<_>>()
+            .join(" ")
+    )
+}
+
+#[cfg(not(feature = "legacy-tls"))]
+pub fn tls_backend() -> String {
+    "rustls (TLS 1.2 and 1.3)".to_owned()
+}
+
+fn legacy_rebuild_command() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "bash scripts/build-macos-app.sh --legacy-tls"
+    } else {
+        "cargo build --release --no-default-features --features legacy-tls"
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TlsFailure {
+    /// The server answered with TLS 1.0 or 1.1, or rejected our versions.
+    OldProtocol,
+    /// The server lacks RFC 5746 secure renegotiation (unpatched Windows).
+    LegacyRenegotiation,
+    /// The handshake completed far enough to reject the certificate.
+    Certificate,
+    /// The socket closed mid-handshake with no stated reason.
+    Closed,
+}
+
+fn tls_failure(lower: &str) -> Option<TlsFailure> {
+    let any = |needles: &[&str]| needles.iter().any(|needle| lower.contains(needle));
+    if any(&[
+        "servertlsversionisdisabledbyourconfig",
+        "serverdoesnotsupporttls12or13",
+        "fatal alert: protocolversion",
+        "unsupported protocol",
+        "no protocols available",
+        "wrong version number",
+        "alert protocol version",
+    ]) {
+        Some(TlsFailure::OldProtocol)
+    } else if lower.contains("unsafe legacy renegotiation") {
+        Some(TlsFailure::LegacyRenegotiation)
+    } else if any(&[
+        "certificate",
+        "unknownissuer",
+        "self-signed",
+        "self signed",
+        "hostname mismatch",
+        "not trusted",
+        "ee key too small",
+        "ca md too weak",
+    ]) {
+        Some(TlsFailure::Certificate)
+    } else if any(&[
+        "connection closed",
+        "handshake",
+        "unexpected eof",
+        "peer closed",
+        "connection reset",
+        "forming tls",
+    ]) {
+        Some(TlsFailure::Closed)
+    } else {
+        None
+    }
+}
+
+fn certificate_advice() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "The server certificate was rejected. Install its certificate authority in the Windows certificate store, or check Trust server certificate for this connection. That override skips certificate and hostname checks, so use it only for a server you already trust."
+    } else {
+        "The server certificate was rejected. Add its certificate authority in Keychain Access, or check Trust server certificate for this connection. That override skips certificate and hostname checks, so use it only for a server you already trust."
+    }
+}
+
+fn tls_advice(failure: TlsFailure) -> String {
+    let legacy = cfg!(feature = "legacy-tls");
+    let backend = tls_backend();
+    let rebuild = legacy_rebuild_command();
+    let text = match failure {
+        TlsFailure::OldProtocol if legacy => {
+            "The server refused every TLS version this build offers, including TLS 1.0. Check that the host and port reach SQL Server itself, then ask IT to enable TLS 1.2 (SQL Server 2012 SP4, or the KB3135244 TLS 1.2 update).".to_owned()
+        }
+        TlsFailure::OldProtocol => {
+            format!("This server only offers TLS 1.0 or 1.1, which this build refuses. Ask IT to enable TLS 1.2 (SQL Server 2012 SP4, or the KB3135244 TLS 1.2 update). Until then, quit and rebuild with: {rebuild}")
+        }
+        TlsFailure::LegacyRenegotiation => {
+            "The server's Windows TLS stack predates the 2010 secure-renegotiation fix (RFC 5746). The legacy build allows this; the server should still be patched.".to_owned()
+        }
+        TlsFailure::Certificate => certificate_advice().to_owned(),
+        TlsFailure::Closed if legacy => {
+            "The server closed the connection during the TLS handshake, before any certificate was checked, so Trust server certificate does not apply. This build already allows TLS 1.0. Confirm the host and TCP port reach SQL Server, and that the server's Schannel TLS 1.0 protocol has not been disabled without enabling TLS 1.2.".to_owned()
+        }
+        TlsFailure::Closed => {
+            format!("The server closed the connection during the TLS handshake, before any certificate was checked, so Trust server certificate does not apply. On SQL Server 2012 this usually means the server only speaks TLS 1.0. Ask IT to enable TLS 1.2 (SQL Server 2012 SP4, or the KB3135244 TLS 1.2 update), or quit and rebuild with: {rebuild}")
+        }
+    };
+    format!("{text} TLS: {backend}.")
+}
+
 fn classify_message(message: &str) -> MonitorError {
     let lower = message.to_lowercase();
+    let tls = tls_failure(&lower).map(tls_advice);
     let friendly = if lower.contains("login failed") {
-        "Login failed. Verify the authentication method and credentials."
-    } else if lower.contains("certificate") || lower.contains("tls") {
-        "TLS validation failed. Install a trusted server certificate, or explicitly enable the certificate override for this connection."
+        if cfg!(target_os = "macos") {
+            "Login failed. Verify the SQL Server login and password."
+        } else {
+            "Login failed. Verify the authentication method and credentials."
+        }
+    } else if let Some(advice) = tls.as_deref() {
+        advice
     } else if lower.contains("sqlserveragent")
         || lower.contains("sql server agent")
         || lower.contains("agent xp")
@@ -571,7 +728,127 @@ mod tests {
     }
 
     #[test]
+    fn splits_comma_port_only_without_explicit_port() {
+        assert_eq!(
+            split_port("dwh.example.com,14330", None),
+            ("dwh.example.com", Some(14330))
+        );
+        assert_eq!(
+            split_port("dwh,14330", Some(1500)),
+            ("dwh,14330", Some(1500))
+        );
+        assert_eq!(split_port("dwh", None), ("dwh", None));
+        assert_eq!(split_port("dwh,abc", None), ("dwh,abc", None));
+    }
+
+    #[tokio::test]
+    async fn rejects_a_missing_sql_login_before_connecting() {
+        let options = ConnectionOptions {
+            server: "dwh".to_owned(),
+            port: None,
+            database: "msdb".to_owned(),
+            authentication: Authentication::SqlServer {
+                username: " ".to_owned(),
+                password: Zeroizing::new(String::new()),
+            },
+            trust_server_certificate: false,
+        };
+        assert!(matches!(
+            connect(&options).await,
+            Err(MonitorError::MissingLogin)
+        ));
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[tokio::test]
+    async fn rejects_windows_authentication_off_windows() {
+        let options = ConnectionOptions {
+            server: "dwh".to_owned(),
+            port: None,
+            database: "msdb".to_owned(),
+            authentication: Authentication::Integrated,
+            trust_server_certificate: false,
+        };
+        assert!(matches!(
+            connect(&options).await,
+            Err(MonitorError::WindowsAuthUnavailable)
+        ));
+    }
+
+    #[test]
     fn sanitizes_multiline_errors() {
         assert_eq!(sanitize("first\r\nsecond"), "first  second");
+    }
+
+    #[test]
+    fn handshake_closure_is_not_called_a_certificate_failure() {
+        let text = classify_message("Error forming TLS connection: connection closed via error")
+            .to_string();
+        assert!(
+            text.contains("closed the connection during the TLS handshake"),
+            "{text}"
+        );
+        assert!(text.contains(&tls_backend()), "{text}");
+        assert!(
+            text.contains("Trust server certificate does not apply"),
+            "{text}"
+        );
+        assert!(text.contains("connection closed via error"), "{text}");
+        assert!(!text.contains("certificate was rejected"), "{text}");
+    }
+
+    #[test]
+    fn certificate_rejection_still_offers_the_trust_override() {
+        let text = classify_message(
+            "Error forming TLS connection: the server's certificate was rejected during the TLS handshake: UnknownIssuer",
+        )
+        .to_string();
+        assert!(text.contains("certificate was rejected"), "{text}");
+        assert!(text.contains("Trust server certificate"), "{text}");
+        assert!(text.contains("UnknownIssuer"), "{text}");
+        assert!(!text.contains("does not apply"), "{text}");
+    }
+
+    #[test]
+    fn names_a_tls10_only_server_from_rustls_and_openssl_errors() {
+        for raw in [
+            "Error forming TLS connection: peer is incompatible: ServerDoesNotSupportTls12Or13",
+            "An error occurred during the attempt of performing I/O: received fatal alert: ProtocolVersion",
+            "Error forming TLS connection: error:0A000102:SSL routines::unsupported protocol",
+            "Error forming TLS connection: error:0A00010B:SSL routines::wrong version number",
+        ] {
+            assert_eq!(
+                tls_failure(&raw.to_lowercase()),
+                Some(TlsFailure::OldProtocol),
+                "{raw}"
+            );
+            let text = classify_message(raw).to_string();
+            assert!(text.contains("KB3135244"), "{text}");
+            assert!(text.contains("TLS 1.0"), "{text}");
+        }
+    }
+
+    #[test]
+    fn default_build_points_tls10_servers_at_the_legacy_build() {
+        let text =
+            classify_message("peer is incompatible: ServerDoesNotSupportTls12Or13").to_string();
+        if cfg!(feature = "legacy-tls") {
+            assert!(!text.contains("--legacy-tls"), "{text}");
+        } else {
+            assert!(
+                text.contains("--legacy-tls") || text.contains("--features legacy-tls"),
+                "{text}"
+            );
+            assert!(text.contains("rustls"), "{text}");
+        }
+    }
+
+    #[test]
+    fn recognises_missing_secure_renegotiation() {
+        let raw = "error:0A000152:SSL routines::unsafe legacy renegotiation disabled";
+        assert_eq!(
+            tls_failure(&raw.to_lowercase()),
+            Some(TlsFailure::LegacyRenegotiation)
+        );
     }
 }

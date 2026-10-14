@@ -1,0 +1,31 @@
+name: macOS
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Format
+        run: cargo fmt --check
+      - name: Lint
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Test
+        run: cargo test
+      - name: Lint and test the legacy OpenSSL build
+        run: |
+          export PATH="$(brew --prefix openssl@3)/bin:$PATH"
+          cargo clippy --all-targets --no-default-features --features legacy-tls -- -D warnings
+          cargo test --no-default-features --features legacy-tls
+      - name: Bundle
+        run: bash scripts/build-macos-app.sh --universal --dmg
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sql-job-monitor-macos
+          path: dist/*.dmg

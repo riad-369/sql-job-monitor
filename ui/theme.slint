@@ -1,40 +1,46 @@
+import { Platform } from "platform.slint";
+
 export global Theme {
     in-out property <int> mode: 0;
     in-out property <bool> system-light: false;
     out property <bool> light: root.mode == 2 || (root.mode == 0 && root.system-light);
+    out property <bool> macos: Platform.macos;
 
-    out property <color> bg: root.light ? #f3f5f8 : #10151d;
-    out property <color> surface: root.light ? #ffffff : #18212d;
-    out property <color> grid: root.light ? #f7f9fc : #151d27;
-    out property <color> row-alt: root.light ? #eef2f6 : #141c27;
-    out property <color> panel: root.light ? #ffffff : #111821;
-    out property <color> menu: root.light ? #ffffff : #202b39;
-    out property <color> hover: root.light ? #e6eef6 : #2c3d52;
-    out property <color> hover-strong: root.light ? #dce7f2 : #1a2532;
-    out property <color> selected: root.light ? #d6e7f8 : #294566;
-    out property <color> selected-soft: root.light ? #e8f2fb : #243446;
-    out property <color> border: root.light ? #d5dee8 : #2a394b;
-    out property <color> border-strong: root.light ? #b4c3d3 : #4b5e74;
-    out property <color> line: root.light ? #e1e8ef : #223041;
-    out property <color> divider: root.light ? #d8e1ea : #344458;
-    out property <color> text: root.light ? #1a2633 : #f4f7fb;
-    out property <color> text-strong: root.light ? #121b26 : #f0f4f9;
-    out property <color> text-body: root.light ? #243444 : #d5deea;
-    out property <color> heading: root.light ? #3e5268 : #b8c5d6;
-    out property <color> label: root.light ? #3e5268 : #c8d2df;
-    out property <color> muted: root.light ? #5c7084 : #91a2b7;
-    out property <color> muted-2: root.light ? #6a7e92 : #8191a5;
-    out property <color> faint: root.light ? #7d8fa1 : #8b9aaf;
-    out property <color> icon-muted: root.light ? #7d90a3 : #56687d;
-    out property <color> error-bg: root.light ? #fdecee : #3b2025;
-    out property <color> error-text: root.light ? #a32036 : #ffb7bf;
-    out property <color> ok: root.light ? #0f7a42 : #76d69b;
-    out property <color> info: root.light ? #1464aa : #63b3ff;
-    out property <color> info-soft: root.light ? #1a5c96 : #8dbbe8;
-    out property <color> fail: root.light ? #c42840 : #ff7d8b;
-    out property <color> warn: root.light ? #8a5a00 : #f2c66d;
-    out property <color> splitter: root.light ? #c5d2df : #3c5168;
-    out property <color> splitter-active: root.light ? #5d87ad : #8eabc8;
-    out property <color> titlebar: root.light ? #ffffff : #10151d;
-    out property <string> mode-label: root.mode == 1 ? "Theme: Dark" : root.mode == 2 ? "Theme: Light" : "Theme: Follow system";
+    // Windows keeps the navy palette. macOS uses system grays and the accent blue.
+    out property <color> bg: root.macos ? (root.light ? #f5f5f7 : #1c1c1e) : (root.light ? #f3f5f8 : #10151d);
+    out property <color> surface: root.macos ? (root.light ? #ffffff : #242426) : (root.light ? #ffffff : #18212d);
+    out property <color> grid: root.macos ? (root.light ? #fbfbfd : #1f1f21) : (root.light ? #f7f9fc : #151d27);
+    out property <color> row-alt: root.macos ? (root.light ? #f2f2f5 : #262628) : (root.light ? #eef2f6 : #141c27);
+    out property <color> panel: root.macos ? (root.light ? #ffffff : #1a1a1c) : (root.light ? #ffffff : #111821);
+    out property <color> menu: root.macos ? (root.light ? #ffffff : #2c2c2e) : (root.light ? #ffffff : #202b39);
+    out property <color> hover: root.macos ? (root.light ? #e8e8ed : #36363a) : (root.light ? #e6eef6 : #2c3d52);
+    out property <color> hover-strong: root.macos ? (root.light ? #dedee3 : #2c2c30) : (root.light ? #dce7f2 : #1a2532);
+    out property <color> selected: root.macos ? (root.light ? #d3e5fc : #17406e) : (root.light ? #d6e7f8 : #294566);
+    out property <color> selected-soft: root.macos ? (root.light ? #e8f1fd : #1d324b) : (root.light ? #e8f2fb : #243446);
+    out property <color> border: root.macos ? (root.light ? #d2d2d7 : #38383a) : (root.light ? #d5dee8 : #2a394b);
+    out property <color> border-strong: root.macos ? (root.light ? #b0b0b8 : #545458) : (root.light ? #b4c3d3 : #4b5e74);
+    out property <color> line: root.macos ? (root.light ? #e5e5ea : #2e2e30) : (root.light ? #e1e8ef : #223041);
+    out property <color> divider: root.macos ? (root.light ? #d8d8dc : #3a3a3c) : (root.light ? #d8e1ea : #344458);
+    out property <color> text: root.macos ? (root.light ? #1d1d1f : #f5f5f7) : (root.light ? #1a2633 : #f4f7fb);
+    out property <color> text-strong: root.macos ? (root.light ? #000000 : #ffffff) : (root.light ? #121b26 : #f0f4f9);
+    out property <color> text-body: root.macos ? (root.light ? #3a3a3c : #d1d1d6) : (root.light ? #243444 : #d5deea);
+    out property <color> heading: root.macos ? (root.light ? #515154 : #aeaeb2) : (root.light ? #3e5268 : #b8c5d6);
+    out property <color> label: root.macos ? (root.light ? #48484a : #c7c7cc) : (root.light ? #3e5268 : #c8d2df);
+    out property <color> muted: root.macos ? (root.light ? #6e6e73 : #a1a1a6) : (root.light ? #5c7084 : #91a2b7);
+    out property <color> muted-2: root.macos ? (root.light ? #737378 : #98989d) : (root.light ? #6a7e92 : #8191a5);
+    out property <color> faint: root.macos ? (root.light ? #86868b : #8e8e93) : (root.light ? #7d8fa1 : #8b9aaf);
+    out property <color> icon-muted: root.macos ? (root.light ? #8e8e93 : #636366) : (root.light ? #7d90a3 : #56687d);
+    out property <color> error-bg: root.macos ? (root.light ? #fdecec : #3a1f1f) : (root.light ? #fdecee : #3b2025);
+    out property <color> error-text: root.macos ? (root.light ? #b3261e : #ffa39e) : (root.light ? #a32036 : #ffb7bf);
+    out property <color> ok: root.macos ? (root.light ? #1f7a35 : #32d74b) : (root.light ? #0f7a42 : #76d69b);
+    out property <color> info: root.macos ? (root.light ? #0066cc : #409cff) : (root.light ? #1464aa : #63b3ff);
+    out property <color> info-soft: root.macos ? (root.light ? #2a6fb8 : #70b4ff) : (root.light ? #1a5c96 : #8dbbe8);
+    out property <color> fail: root.macos ? (root.light ? #d70015 : #ff6961) : (root.light ? #c42840 : #ff7d8b);
+    out property <color> warn: root.macos ? (root.light ? #935d00 : #ffd60a) : (root.light ? #8a5a00 : #f2c66d);
+    out property <color> splitter: root.macos ? (root.light ? #c7c7cc : #48484a) : (root.light ? #c5d2df : #3c5168);
+    out property <color> splitter-active: root.macos ? (root.light ? #0071e3 : #0a84ff) : (root.light ? #5d87ad : #8eabc8);
+    out property <color> titlebar: root.macos ? (root.light ? #ececee : #2a2a2c) : (root.light ? #ffffff : #10151d);
+    out property <string> mode-label: root.macos
+        ? (root.mode == 1 ? "Appearance: Dark" : root.mode == 2 ? "Appearance: Light" : "Appearance: Match System")
+        : (root.mode == 1 ? "Theme: Dark" : root.mode == 2 ? "Theme: Light" : "Theme: Follow system");
 }

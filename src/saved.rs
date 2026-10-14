@@ -10,6 +10,7 @@ pub struct SavedConnection {
     pub id: String,
     pub server: String,
     pub port: Option<u16>,
+    #[serde(default)]
     pub windows_auth: bool,
     pub username: String,
     pub trust_server_certificate: bool,
@@ -38,10 +39,7 @@ impl SavedConnection {
 }
 
 pub fn connections_path() -> PathBuf {
-    let base = std::env::var_os("APPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-    base.join("SQL Job Monitor").join("connections.json")
+    crate::paths::app_data_dir().join("connections.json")
 }
 
 pub fn load() -> Vec<SavedConnection> {
@@ -52,7 +50,18 @@ pub fn load_from(path: &Path) -> Vec<SavedConnection> {
     let Ok(text) = fs::read_to_string(path) else {
         return Vec::new();
     };
-    serde_json::from_str(&text).unwrap_or_default()
+    let mut connections: Vec<SavedConnection> = serde_json::from_str(&text).unwrap_or_default();
+    drop_integrated_auth(&mut connections);
+    connections
+}
+
+/// macOS cannot sign in with a Windows account, so those saved entries are skipped.
+fn drop_integrated_auth(connections: &mut Vec<SavedConnection>) {
+    #[cfg(not(target_os = "windows"))]
+    connections
+        .retain(|connection| !connection.windows_auth && !connection.username.trim().is_empty());
+    #[cfg(target_os = "windows")]
+    let _ = connections;
 }
 
 pub fn store(connections: &[SavedConnection]) -> Result<(), String> {
@@ -151,5 +160,25 @@ mod tests {
         let text = serde_json::to_string(&loaded).unwrap();
         assert_eq!(loaded[0].server, connection.server);
         assert!(!text.to_lowercase().contains("password"));
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn reads_connections_saved_with_the_windows_auth_flag() {
+        let text = r#"[{"id":"1","server":"dwh","port":1433,"windows_auth":false,
+            "username":"reader","trust_server_certificate":true},
+            {"id":"2","server":"dwh","port":null,"windows_auth":true,
+            "username":"","trust_server_certificate":false}]"#;
+        let path = std::env::temp_dir().join(format!("sql-job-monitor-{}.json", Uuid::new_v4()));
+        fs::write(&path, text).unwrap();
+        let loaded = load_from(&path);
+        let _ = fs::remove_file(&path);
+
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].label(), "dwh:1433");
+        assert_eq!(
+            loaded[0].detail(),
+            "SQL login reader · certificate override"
+        );
     }
 }
